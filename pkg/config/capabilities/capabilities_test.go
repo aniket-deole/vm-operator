@@ -194,7 +194,7 @@ var _ = Describe("UpdateCapabilities", func() {
 							config.Features.GuestCustomizationVCDParity = true
 							config.Features.VSpherePolicies = true
 							config.Features.VMAffinityRules = true
-						)
+						})
 					})
 					Specify("capabilities did not change", func() {
 						Expect(changed).To(BeFalse())
@@ -742,11 +742,11 @@ var _ = Describe("UpdateCapabilitiesFeatures", func() {
 					Activated: true,
 				}
 			})
-		})
-		Specify("Enabled", func() {
-			Expect(ok).To(BeTrue())
-			Expect(diff).To(Equal("VMAffinityRules=true"))
-			Expect(pkgcfg.FromContext(ctx).Features.VMAffinityRules).To(BeTrue())
+			Specify("Enabled", func() {
+				Expect(ok).To(BeTrue())
+				Expect(diff).To(Equal("VMAffinityRules=true"))
+				Expect(pkgcfg.FromContext(ctx).Features.VMAffinityRules).To(BeTrue())
+			})
 		})
 	})
 })
