@@ -94,7 +94,7 @@ const (
 
 	// CapabilityVMAffinityRules is the name of the capability key deifned in
 	// the Supervisor capabilities CRD for enabling affinity/anti-affinity rules
-	// for VM Placement
+	// for VM Placement.
 	CapabilityKeyVMAffinityRules = "supports_VM_service_affinity_rules"
 )
 
