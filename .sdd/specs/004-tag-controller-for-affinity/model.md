@@ -143,8 +143,11 @@ name = "tag-" + pkgutil.SHA1Sum17(spec.label + ":" + spec.value)
 | **Tag category** | `<metadata.namespace>` |
 | **Emitted as** | `vimtypes.TagSpec{ArrayUpdateSpec{Operation: add\|remove}, Id: TagId{NameId: &TagIdNameId{Tag: name, Category: category}}}` |
 | **Created by** | `vpxd`, when named in the VM's reconfigure request; or assumed pre-existing (spec NG1) |
+| **Applied set recorded in** | the VM's ExtraConfig, key `vmservice.affinity.tags` — **not** on the `Tag` resource (D12) |
 
 Keeping this format identical to today's (D6) is what makes the emitted tags interchangeable with the Compute Policy side, which builds `TagId.NameId` the same way in `buildTagIDsFromTopology`.
+
+Which of these tags a given VM currently carries is recorded on the **VM**, in its own ExtraConfig key, and nowhere on the `Tag` resource. That is deliberate and consistent with "Ownership vs. tag carriage" below: the `Tag` never enumerates the VMs that carry it. The record exists because the attached-tag list vCenter returns is a list of tag URNs that cannot be matched against name+category tags, so it is the only way to know which of this feature's tags were previously applied — the same reason and the same workflow mechanism B uses with `vmservice.policy.tags`. See `research.md` "The attached-tag list is UUIDs and is not on `moVM`" and `plan.md` "`ReconcileTagSpecs` — steps 4-5".
 
 ---
 
@@ -153,6 +156,8 @@ Keeping this format identical to today's (D6) is what makes the emitted tags int
 The resource is designed so that "does a `Tag` for this label exist?" and "give me the `Tag`s for this label" are both answerable without scanning the namespace. Three mechanisms, in order of preference:
 
 1. **The derived name is the primary key.** `metadata.name` is a pure function of `spec.label` + `spec.value` (see "Name derivation"), so an exact-pair existence check is a `Get` — an O(1) point read against the cache, no list and no selector. This is the check the VM reconcile path runs once per owned pair, and it is by far the most frequent query in the feature.
+
+   One caveat applies to every read here, including this one: the client is the manager's **cached** client, so a `Tag` created earlier in the same reconcile is not guaranteed to be readable later in that reconcile. The VM path therefore carries the objects it created forward in memory rather than re-reading them; see `plan.md` "`ReconcileTagSpecs` — steps 4-5".
 2. **Field indexes** for the cases where the pair is not fully known up front, registered by the `Tag` controller's `AddToManager` against the shared manager cache and therefore available to every client built from it:
 
    | Index name | Indexed value | Answers |
@@ -184,8 +189,8 @@ Tag carriage does not consult the VM's `spec.affinity`, so the owner set is a **
 2. **Ownership add**: a VM adds **only its own** owner-reference entry, when it both carries the label and references it from `spec.affinity`.
 3. **Ownership remove**: a VM removes **only its own** entry, when either condition stops holding, or when the VM is being deleted (before its finalizer is released).
 4. **Concurrent ownership writes**: every ownership write is a patch built with `client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})`, skipped entirely when `apiequality.Semantic.DeepEqual` reports no change to `ownerReferences`. A conflict is returned and retried by the next reconcile. A plain merge patch is **not** acceptable: `ownerReferences` is a list field and a merge patch would replace it wholesale, silently dropping a concurrent writer's entry.
-5. **Deletion at zero owners**: the `Tag` controller deletes the `Tag` when it observes an empty `ownerReferences` list. Ordinary owner-reference garbage collection is a backstop that covers only the "all owner VMs deleted" case — it does **not** delete an object whose owner list was emptied while those owners still exist. See [`research.md`](./research.md) "Owner-reference garbage collection".
-6. **Deletion fan-out**: before releasing `vmoperator.vmware.com/tag`, the `Tag` controller enqueues every VM in the namespace carrying `spec.label=spec.value` — via the `metadata.labels.keyValue` index, not a namespace scan — so label-only VMs drop the vCenter tag (spec G5).
+5. **Deletion at zero owners**: the `Tag` controller `Delete`s the `Tag` when it observes an empty `ownerReferences` list. Because the finalizer is held, that only sets `deletionTimestamp` — which is itself the event that fans out (invariant 6). Ordinary owner-reference garbage collection is a backstop that covers only the "all owner VMs deleted" case — it does **not** delete an object whose owner list was emptied while those owners still exist. See [`research.md`](./research.md) "Owner-reference garbage collection", and V6's allow-list above for what that backstop needs from admission.
+6. **Deletion fan-out**: every VM in the namespace carrying `spec.label=spec.value` is enqueued by the VM controller's `Tag` watch — via the `metadata.labels.keyValue` index, not a namespace scan — so label-only VMs drop the vCenter tag (spec G5). A deletion produces two such fan-outs, on the `deletionTimestamp` update and on the object's disappearance; both converge to the same answer, because a woken VM sees the `Tag` as either terminating or absent and the VM path's desired-set computation excludes both, so it emits `TagSpec{remove}` either way. The `Tag` controller itself enqueues nothing on any path (D16, D19).
 7. **Re-create during deletion**: while a `Tag` with the derived name exists with a non-zero `deletionTimestamp`, a VM that needs it MUST NOT adopt it and MUST NOT skip tagging; the reconcile requeues until the delete completes and the create succeeds (spec G12).
 8. **Status ownership**: only the `Tag` controller writes `status`, via the status subresource, with the same optimistic-lock-and-skip-if-unchanged discipline.
 9. **No vCenter work**: nothing in the `Tag`'s lifecycle calls vCenter. `status.id` stays empty (spec NG1).
@@ -215,9 +220,29 @@ Located at `webhooks/vspherepolicy/tag/validation/tag_validator.go` (D8). Verbs:
 | V3 | `spec.label` MUST NOT change | UPDATE | `field.Forbidden(spec.label, "field is immutable")` |
 | V4 | `spec.value` MUST NOT change | UPDATE | `field.Forbidden(spec.value, "field is immutable")` |
 | V5 | `metadata.name` MUST equal the derived name for `spec.label`/`spec.value` | CREATE | `field.Invalid(metadata.name, …)` |
-| V6 | Only privileged accounts may create, update, or delete a `Tag` | CREATE, UPDATE, DELETE | `field.Forbidden(…, "only privileged users may …")` |
+| V6 | Only privileged accounts, or the system service accounts allow-listed below, may create, update, or delete a `Tag` | CREATE, UPDATE, DELETE | `field.Forbidden(…, "only privileged users may …")` |
 
 V6 uses the existing `pkgctx.WebhookRequestContext.IsPrivilegedAccount` mechanism, which is what admits the VM Operator service account and CSP admins while rejecting DevOps users (spec G9, US4 scenarios 3-4).
+
+#### V6's system-account allow-list
+
+`IsPrivilegedAccount` (`pkg/builder/auth.go:42`) matches the VM Operator service account, `system:masters`, `kubernetes-admin`, and `PRIVILEGED_USERS`. Two Kubernetes control-plane clients match none of them and **must** be allow-listed, checked before the privileged test:
+
+```go
+var allowedSystemAccountsForTag = map[string]struct{}{
+    "system:serviceaccount:kube-system:generic-garbage-collector": {},
+    "system:serviceaccount:kube-system:namespace-controller":      {},
+}
+```
+
+- `generic-garbage-collector` needs **UPDATE** to prune a dangling owner reference left by a deleted VM, and **DELETE** for the all-owners-deleted backstop. Blocking the UPDATE is the more damaging of the two: a stale owner reference makes the `Tag` look owned forever, so the `Tag` controller's delete-at-zero-owners never fires either, leaving an orphaned `Tag` and a permanently stale vCenter tag on every label-only VM.
+- `namespace-controller` needs **DELETE** to tear down namespaced resources. Denying it leaves the namespace in `Terminating` indefinitely.
+
+This mirrors `webhooks/persistentvolumeclaim/validation/persistentvolumeclaim_validator.go:36-43`, the only other webhook in this repository that intercepts DELETE, which keeps an equivalent allow-list containing both of these accounts.
+
+The allow-list does not weaken spec G9 or US4 scenarios 3-4: a DevOps user is still rejected on CREATE, UPDATE and DELETE, and cannot impersonate a `kube-system` service account.
+
+Note on V3/V4: the fan-out predicate depends on them. Because `spec` cannot change and the mapper's `List` key is derived from `spec` alone, an UPDATE is only interesting when it sets `deletionTimestamp` — which is what lets the predicate filter out the `Tag` controller's own status/finalizer/label-mirror writes and the VM path's owner-reference patches (`plan.md` "Fan-out — the VM controller's `Tag` watch"). If V3/V4 were ever relaxed, that predicate must be revisited in the same change.
 
 Note on V5: it is a consistency check, not a security control — the name derivation is deterministic, so a hand-written `Tag` with a mismatched name would be invisible to the VM reconcile path (which looks the resource up by derived name) and would linger as garbage.
 
@@ -225,7 +250,7 @@ Note on V5: it is a consistency check, not a security control — the name deriv
 
 ## RBAC
 
-The VM controller's role needs write access to `Tag` (it creates them and patches ownership); the `Tag` controller needs the standard controller set plus status, **and** read access to `VirtualMachine` for its fan-out `List`:
+The VM controller's role needs write access to `Tag` (it creates them and patches ownership) **and** `watch` on it (the fan-out watch); the `Tag` controller needs the standard controller set plus status:
 
 ```go
 // On both controllers/virtualmachine/virtualmachine/virtualmachine_controller.go
@@ -234,10 +259,9 @@ The VM controller's role needs write access to `Tag` (it creates them and patche
 
 // On controllers/vspherepolicy/tag/tag_controller.go only:
 // +kubebuilder:rbac:groups=vsphere.policy.vmware.com,resources=tags/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=vmoperator.vmware.com,resources=virtualmachines,verbs=get;list;watch
 ```
 
-The `virtualmachines` read marker is easy to overlook because the VM controller already has it — but the `Tag` controller is a separate reconciler in the same manager, and its fan-out (`List` VMs by the label index) fails without it. The manager shares one role, so the effective permission set is a union; the marker still belongs on the `Tag` controller so the dependency survives any future split of the role. `make generate-manifests` regenerates `config/rbac/role.yaml`.
+No new `virtualmachines` marker is needed. The fan-out `List` runs in the VM controller's mapper, and that controller already holds `virtualmachines` read; the `Tag` controller reads only its own object. `make generate-manifests` regenerates `config/rbac/role.yaml`.
 
 DevOps-user-facing RBAC is deliberately **not** extended: no role in `config/` grants `Tag` access to namespace users, and admission rule V6 backs that up.
 
@@ -290,7 +314,7 @@ metadata:
 spec: {}   # no affinity
 ```
 
-The `Tag` above is **unchanged** — `vm-label-only` does not become an owner — but `vm-label-only` receives vCenter tag `app:nginx` in category `ns-1` on its next reconcile, triggered by the `Tag` controller's fan-out.
+The `Tag` above is **unchanged** — `vm-label-only` does not become an owner — but `vm-label-only` receives vCenter tag `app:nginx` in category `ns-1` on its next reconcile, triggered by the VM controller's `Tag` watch.
 
 ### US3 — affinity changed away from the label
 

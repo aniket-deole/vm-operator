@@ -17,10 +17,12 @@ This document specifies the end-to-end suite for this feature: the scenarios the
 
 ## Gating
 
-The feature is gated on `Features.TaggingAPI`, which in this change set is a plain feature flag with **no** Supervisor capability backing it (spec NG6), so there is nothing for the suite to query to decide whether the behavior is enabled. The suite therefore:
+The feature is gated on `Features.TaggingAPI`, which in this change set is a plain feature flag with **no** Supervisor capability backing it (spec NG6), so there is no capability for the suite to query. The `Tag` CRD's presence is used instead. The suite:
 
-- Skips entirely when no `Tag` CRD is registered on the target Supervisor (a `NoKindMatchError` on the first `Tag` list), which is the only reliable cluster-observable signal available today.
-- Once the flag is wired to a capability (see `research.md` "Open follow-ups"), this check should be replaced with a capability lookup and a named constant in `test/e2e/vmservice/consts/consts.go`, alongside the existing `VMAffinityDuringExecutionCapabilityName`.
+- Skips entirely when no `Tag` CRD is registered on the target Supervisor — a `NoKindMatchError` on the first `Tag` list.
+- Relies on T002b's `case "Tag":` in `pkgcrd.Install` for that to mean anything: without it the kind falls through to `Install`'s `default:` branch and is installed unconditionally, on every Supervisor, feature or no feature.
+- Gets a **one-way** signal even with T002b, and should be read that way. Absence is conclusive — the flag has never been on. Presence is not: CRD deletion on flag-off is additionally gated on `pkgcfg.CRDCleanupEnabled`, which defaults to `false`, so a Supervisor that once had the flag on keeps the CRD after it is turned off. On such a cluster the suite will run and fail rather than skip. That is acceptable for CI, which builds fresh, and is the reason every scenario keeps `"experimental"` until the capability lookup lands.
+- Should switch to a capability lookup with a named constant in `test/e2e/vmservice/consts/consts.go` — alongside the existing `VMAffinityDuringExecutionCapabilityName` — once the flag is wired to one (`research.md` "Open follow-ups"). That closes the one-way gap; T037 should not drop `"experimental"` before it does.
 
 Verifying the vCenter-side tag is what actually proves the behavior; asserting only on `Tag` resources would pass even if no tag ever reached a VM. Scenarios that assert the vCenter side read the VM's attached tags directly via `govmomi` and therefore carry `"extended-functional"`.
 
@@ -41,7 +43,7 @@ Verifying the vCenter-side tag is what actually proves the behavior; asserting o
 | Scenario | Verifies |
 |----------|----------|
 | tags a pre-existing label-only VM once a later VM references the label | US2.1 — the label-only VM is untagged before the referencing VM exists, and is tagged after; the `Tag` records **only** the referencing VM as an owner |
-| untags the label-only VM when the referencing VM is deleted | US2.2 — the vCenter tag is removed from the label-only VM and the `Tag` is deleted, driven by the `Tag` controller's fan-out on delete |
+| untags the label-only VM when the referencing VM is deleted | US2.2 — the vCenter tag is removed from the label-only VM and the `Tag` is deleted, driven by the VM controller's `Tag` watch when the `Tag` starts terminating |
 | does not tag a same-labeled VM in a different namespace | US2.3 — namespace isolation: a `Tag` appears only in the referencing VM's namespace, and the other namespace's VM stays untagged (spec G6) |
 | tags a label-only VM created after the Tag CR already exists | US2.4 — a newly-created label-only VM picks up the vCenter tag on its first reconcile and is not added as an owner |
 
@@ -81,3 +83,4 @@ Verifying the vCenter-side tag is what actually proves the behavior; asserting o
 - `status.id` remaining empty (spec NG1) needs no scenario: it is an absence, already asserted at the unit level, with no cluster-observable consequence.
 - Admission rule V5 (resource name must equal the derived name) is unit-tested only; it can only be triggered by hand-authoring a `Tag`, which no supported workflow does.
 - Unsupported label-selector operators being ignored rather than fatal is unit-tested only — it has no cluster-observable effect beyond the absence of a tag.
+- The two accepted limitations of diffing against the ExtraConfig record rather than the live attached-tag list (spec "Edge cases": a tag detached out of band is not re-applied, and a remove may be emitted for a tag already gone) are not E2E-tested. The first would require detaching a tag directly in vCenter to assert that VM Operator does *not* react, which is a test that passes for the wrong reasons; the second has no observable effect. Both are covered at the unit level (tasks.md T014a).
