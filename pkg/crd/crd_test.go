@@ -81,6 +81,10 @@ var (
 		"tagpolicies.vsphere.policy.vmware.com",
 	}
 
+	externalTagAPI = []string{
+		"tags.vsphere.policy.vmware.com",
+	}
+
 	externalVIMConfigPolicy = []string{
 		"configtargets.vim.vmware.com",
 		"virtualmachineconfigoptions.vim.vmware.com",
@@ -91,6 +95,7 @@ var (
 	externalAll = slices.Concat(
 		externalBYOK,
 		externalVSpherePolicy,
+		externalTagAPI,
 		externalVIMConfigPolicy,
 		[]string{storagePoliciesCRD},
 	)
@@ -746,6 +751,7 @@ var _ = Describe("Install", func() {
 					config.Features.GuestCustomizationVCDParity = true
 					config.Features.TelcoVMServiceAPI = true
 					config.Features.VirtualMachineConfigPolicy = true
+					config.Features.TaggingAPI = true
 				})
 			})
 			It("should get the expected crds", func() {
@@ -782,13 +788,14 @@ var _ = Describe("Install", func() {
 			Expect(pkgcrd.Install(
 				pkgcfg.WithConfig(pkgcfg.Config{
 					Features: pkgcfg.FeatureStates{
-						FastDeploy:                   true,
-						ImmutableClasses:             true,
-						VMGroups:                     true,
-						VMSnapshots:                  true,
-						VSpherePolicies:              true,
-						BringYourOwnEncryptionKey:    true,
-						VirtualMachineConfigPolicy:   true,
+						FastDeploy:                 true,
+						ImmutableClasses:           true,
+						VMGroups:                   true,
+						VMSnapshots:                true,
+						VSpherePolicies:            true,
+						BringYourOwnEncryptionKey:  true,
+						VirtualMachineConfigPolicy: true,
+						TaggingAPI:                 true,
 					},
 				}),
 				client,

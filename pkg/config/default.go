@@ -29,6 +29,7 @@ func Default() Config {
 			TKGMultipleCL:              false,
 			WorkloadDomainIsolation:    false,
 			StoragePolicyMutability:    false,
+			TaggingAPI:                 true,
 		},
 		InstanceStorage: InstanceStorage{
 			JitterMaxFactor:      1.0,
