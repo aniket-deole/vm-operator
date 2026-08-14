@@ -8,6 +8,13 @@ import (
 	pkgutil "github.com/vmware-tanzu/vm-operator/pkg/util"
 )
 
+// LabelPair is a label key/value pair referenced by a VM's own
+// spec.affinity.
+type LabelPair struct {
+	Key   string
+	Value string
+}
+
 // TagResourceName returns the derived name of the Tag resource that
 // represents the given label key/value pair: "tag-" followed by the first
 // 17 hex characters of the SHA-1 sum of "<key>:<value>".

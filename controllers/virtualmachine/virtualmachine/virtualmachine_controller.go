@@ -15,6 +15,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -196,6 +197,24 @@ func AddToManager(ctx *pkgctx.ControllerManagerContext, mgr manager.Manager) err
 		)
 	}
 
+	// Watch Tag resources to reconcile the VMs that own or carry a label
+	// matching the Tag when it is created or deleted.
+	if pkgcfg.FromContext(ctx).Features.TaggingAPI {
+		// Register the VM Tag field indexes here, alongside the watch
+		// that needs them: every consumer of these indexes is reached through
+		// this controller's reconcile path, so this is their single owner.
+		if err := kubeutil.RegisterVMTagsIndexes(ctx, mgr.GetFieldIndexer()); err != nil {
+			return fmt.Errorf("failed to register VM Tag field indexes: %w", err)
+		}
+
+		builder = builder.Watches(
+			&vspherepolv1.Tag{},
+			handler.EnqueueRequestsFromMapFunc(
+				kubeutil.TagToVirtualMachineMapper(ctx, r.Client)),
+			ctrlbuilder.WithPredicates(kubeutil.TagFanOutPredicate()),
+		)
+	}
+
 	// Setup watches for the network interface CR types supported on this cluster.
 	for _, providerType := range netsetutil.GetClusterSupportedProviderTypesFromConfig(ctx) {
 		switch providerType {
@@ -334,6 +353,7 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups="events.k8s.io",resources=events,verbs=create;update;patch
 // +kubebuilder:rbac:groups="",resources=resourcequotas;namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=encryption.vmware.com,resources=encryptionclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=vsphere.policy.vmware.com,resources=tags,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile the object.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
