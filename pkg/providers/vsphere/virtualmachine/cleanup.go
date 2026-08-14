@@ -54,9 +54,7 @@ func CleanupVMServiceState(
 	clearManagedBy(moVM.Config, &configSpec)
 
 	// Remove tag associations
-	if pkgcfg.FromContext(vmCtx).Features.VSpherePolicies {
-		removeTagAssociations(moVM.Config, &configSpec)
-	}
+	removeTagAssociations(vmCtx, vmCtx.VM.Namespace, moVM.Config, &configSpec)
 
 	// Apply the configuration changes
 	if err := reconfigureVM(vmCtx, vcVM, configSpec); err != nil {
@@ -70,6 +68,8 @@ func CleanupVMServiceState(
 // removeTagAssociations removes any tags that were attached to the VM
 // by VM operator.
 func removeTagAssociations(
+	ctx context.Context,
+	vmNamespace string,
 	config *vimtypes.VirtualMachineConfigInfo,
 	configSpec *vimtypes.VirtualMachineConfigSpec) {
 
@@ -77,28 +77,53 @@ func removeTagAssociations(
 		return
 	}
 
+	ec := object.OptionValueList(config.ExtraConfig)
+
 	// VM operator associates tags to VMs that specify either
 	// mandatory or optional compute policy. Remove those from the
 	// VMs.
 	// VM operator stores any tag that it applies to the VM in the
 	// ExtraConfig.
-	ec := object.OptionValueList(config.ExtraConfig)
-	if v, _ := ec.GetString(policy.ExtraConfigPolicyTagsKey); v != "" {
-		for tag := range strings.SplitSeq(v, ",") {
-			// Just because a tag is present in the ExtraConfig
-			// does not guarantee that it is also associated to
-			// the VM. However, talking to tagging service for
-			// each tag might be non-performant. And Reconfigure
-			// will ignore these tags anyway.
-			ts := vimtypes.TagSpec{
-				ArrayUpdateSpec: vimtypes.ArrayUpdateSpec{
-					Operation: vimtypes.ArrayUpdateOperationRemove,
-				},
-				Id: vimtypes.TagId{
-					Uuid: tag,
-				},
+	if pkgcfg.FromContext(ctx).Features.VSpherePolicies {
+		if v, _ := ec.GetString(policy.ExtraConfigPolicyTagsKey); v != "" {
+			for tag := range strings.SplitSeq(v, ",") {
+				// Just because a tag is present in the ExtraConfig
+				// does not guarantee that it is also associated to
+				// the VM. However, talking to tagging service for
+				// each tag might be non-performant. And Reconfigure
+				// will ignore these tags anyway.
+				ts := vimtypes.TagSpec{
+					ArrayUpdateSpec: vimtypes.ArrayUpdateSpec{
+						Operation: vimtypes.ArrayUpdateOperationRemove,
+					},
+					Id: vimtypes.TagId{
+						Uuid: tag,
+					},
+				}
+				configSpec.TagSpecs = append(configSpec.TagSpecs, ts)
 			}
-			configSpec.TagSpecs = append(configSpec.TagSpecs, ts)
+		}
+	}
+
+	// VM operator associates a NameId tag per namespace-wide affinity
+	// label the VM carries, recorded in ExtraConfigVMTagsKey so
+	// only tags this feature applied are removed here.
+	if pkgcfg.FromContext(ctx).Features.TaggingAPI {
+		if v, _ := ec.GetString(ExtraConfigVMTagsKey); v != "" {
+			for tag := range strings.SplitSeq(v, ",") {
+				ts := vimtypes.TagSpec{
+					ArrayUpdateSpec: vimtypes.ArrayUpdateSpec{
+						Operation: vimtypes.ArrayUpdateOperationRemove,
+					},
+					Id: vimtypes.TagId{
+						NameId: &vimtypes.TagIdNameId{
+							Tag:      tag,
+							Category: vmNamespace,
+						},
+					},
+				}
+				configSpec.TagSpecs = append(configSpec.TagSpecs, ts)
+			}
 		}
 	}
 }

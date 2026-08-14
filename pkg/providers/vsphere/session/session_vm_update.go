@@ -1417,6 +1417,24 @@ func reconcileVMTagCRs(
 	return vmconfvmtags.ReconcileTagCRs(ctx, k8sClient, vm)
 }
 
+// reconcileVMTagSpecs emits the vCenter TagSpec add/remove diff for
+// every label this VM carries that participates in affinity namespace-wide,
+// against this feature's own ExtraConfig record. ownedTags is the result of
+// reconcileVMTagCRs, called earlier in doReconfigure.
+func reconcileVMTagSpecs(
+	ctx context.Context,
+	k8sClient ctrlclient.Client,
+	vm *vmopv1.VirtualMachine,
+	_ *object.VirtualMachine,
+	moVM mo.VirtualMachine,
+	configSpec *vimtypes.VirtualMachineConfigSpec,
+	ownedTags []vspherepolv1.Tag) error {
+
+	pkglog.FromContextOrDefault(ctx).V(4).Info("Reconciling VM Tag specs")
+
+	return vmconfvmtags.ReconcileTagSpecs(ctx, k8sClient, vm, moVM, configSpec, ownedTags)
+}
+
 // reconcileVirtualControllers check if VM need virtual controller changes,
 // If yes, update configSpec.DeviceChange.
 func reconcileVirtualControllers(
@@ -1592,8 +1610,10 @@ func doReconfigure(
 		}
 	}
 
+	var ownedTags []vspherepolv1.Tag
 	if pkgcfg.FromContext(ctx).Features.TaggingAPI {
-		if _, err := reconcileVMTagCRs(
+		var err error
+		if ownedTags, err = reconcileVMTagCRs(
 			ctx,
 			k8sClient,
 			vm); err != nil {
@@ -1610,6 +1630,20 @@ func doReconfigure(
 			vcVM,
 			moVM,
 			&configSpec); err != nil {
+
+			return err
+		}
+	}
+
+	if pkgcfg.FromContext(ctx).Features.TaggingAPI {
+		if err := reconcileVMTagSpecs(
+			ctx,
+			k8sClient,
+			vm,
+			vcVM,
+			moVM,
+			&configSpec,
+			ownedTags); err != nil {
 
 			return err
 		}

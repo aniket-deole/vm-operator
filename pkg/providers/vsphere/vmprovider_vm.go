@@ -1804,6 +1804,18 @@ func (vs *vSphereVMProvider) vmCreateDoPlacement(
 		return err
 	}
 
+	if pkgcfg.FromContext(vmCtx).Features.TaggingAPI {
+		err = virtualmachine.AppendExistingTagSpecs(
+			vmCtx,
+			vs.k8sClient,
+			vmCtx,
+			&placementConfigSpec,
+			!virtualmachine.RecordTagInExtraConfig)
+		if err != nil {
+			return err
+		}
+	}
+
 	pvcZones, err := kubeutil.GetPVCZoneConstraints(
 		createArgs.Storage.StorageClasses,
 		createArgs.Storage.PVCs)
@@ -2597,6 +2609,18 @@ func (vs *vSphereVMProvider) vmCreateGenConfigSpec(
 		createArgs.VMClass.Spec,
 		createArgs.ImageStatus,
 		minCPUFreq)
+
+	if pkgcfg.FromContext(vmCtx).Features.TaggingAPI {
+		if err := virtualmachine.AppendExistingTagSpecs(
+			vmCtx,
+			vs.k8sClient,
+			vmCtx,
+			&createArgs.ConfigSpec,
+			virtualmachine.RecordTagInExtraConfig); err != nil {
+
+			return err
+		}
+	}
 
 	if pkgcfg.FromContext(vmCtx).Features.FastDeploy {
 		if err := vs.vmCreateGenConfigSpecImage(vmCtx, createArgs); err != nil {

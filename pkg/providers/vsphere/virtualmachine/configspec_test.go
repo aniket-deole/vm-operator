@@ -718,6 +718,19 @@ var _ = Describe("CreateConfigSpec", func() {
 				expectedTagNames := []string{"app:web", "env:prod"}
 				assertVMTags(configSpec, expectedTagNames, vmCtx.VM.Namespace)
 			})
+
+			Context("and Features.TaggingAPI is enabled", func() {
+				BeforeEach(func() {
+					pkgcfg.SetContext(vmCtx, func(config *pkgcfg.Config) {
+						config.Features.TaggingAPI = true
+					})
+				})
+
+				It("emits no mechanism-A tag specs, leaving placement policies untouched", func() {
+					Expect(configSpec.VmPlacementPolicies).To(HaveLen(3))
+					assertVMTags(configSpec, []string{}, vmCtx.VM.Namespace)
+				})
+			})
 		})
 
 		When("VMAffinityDuringExecution feature flag is disabled", func() {
@@ -1046,6 +1059,19 @@ var _ = Describe("CreateConfigSpecForPlacement", func() {
 
 					Expect(configSpec.VmPlacementPolicies).To(ConsistOf(pols))
 					assertVMTags(configSpec, []string{"env:prod", "app:db", "zone:us-west"}, vmCtx.VM.Namespace)
+				})
+
+				Context("and Features.TaggingAPI is enabled", func() {
+					BeforeEach(func() {
+						pkgcfg.SetContext(vmCtx, func(config *pkgcfg.Config) {
+							config.Features.TaggingAPI = true
+						})
+					})
+
+					It("emits no mechanism-A tag specs, leaving placement policies untouched", func() {
+						Expect(configSpec.VmPlacementPolicies).To(HaveLen(3))
+						assertVMTags(configSpec, []string{}, vmCtx.VM.Namespace)
+					})
 				})
 			})
 

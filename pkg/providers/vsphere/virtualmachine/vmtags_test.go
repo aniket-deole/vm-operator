@@ -8,8 +8,13 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	vimtypes "github.com/vmware/govmomi/vim25/types"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	vspherepolv1 "github.com/vmware-tanzu/vm-operator/external/vsphere-policy/api/v1alpha1"
 
 	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha6"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
@@ -332,5 +337,135 @@ var _ = Describe("VCenterTagName", func() {
 	It("handles a prefixed key", func() {
 		Expect(virtualmachine.VCenterTagName("example.com/app", "nginx")).To(
 			Equal("example.com/app:nginx"))
+	})
+})
+
+var _ = Describe("AppendExistingTagSpecs", func() {
+	const (
+		ns     = "test-ns"
+		vmName = "test-vm"
+	)
+
+	var (
+		vm                   *vmopv1.VirtualMachine
+		vmCtx                pkgctx.VirtualMachineContext
+		k8sClient            ctrlclient.Client
+		initObjs             []ctrlclient.Object
+		configSpec           vimtypes.VirtualMachineConfigSpec
+		configureExtraConfig bool
+		resultErr            error
+	)
+
+	dummyTag := func(key, value string) *vspherepolv1.Tag {
+		return &vspherepolv1.Tag{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      virtualmachine.TagResourceName(key, value),
+				Namespace: ns,
+			},
+			Spec: vspherepolv1.TagSpec{
+				Key:   key,
+				Value: value,
+			},
+		}
+	}
+
+	BeforeEach(func() {
+		vm = builder.DummyBasicVirtualMachine(vmName, ns)
+		vm.Labels = map[string]string{"app": "web"}
+
+		vmCtx = pkgctx.VirtualMachineContext{
+			Context: pkgcfg.NewContext(),
+			Logger:  suite.GetLogger().WithValues("vmName", vm.GetName()),
+			VM:      vm,
+		}
+
+		initObjs = nil
+		configSpec = vimtypes.VirtualMachineConfigSpec{}
+		configureExtraConfig = false
+	})
+
+	JustBeforeEach(func() {
+		k8sClient = builder.NewFakeClient(initObjs...)
+		resultErr = virtualmachine.AppendExistingTagSpecs(
+			vmCtx, k8sClient, vmCtx, &configSpec, configureExtraConfig)
+	})
+
+	When("a Tag exists matching one of the VM's labels", func() {
+		BeforeEach(func() {
+			initObjs = []ctrlclient.Object{dummyTag("app", "web")}
+		})
+
+		It("emits an add-only TagSpec for that label", func() {
+			Expect(resultErr).ToNot(HaveOccurred())
+			assertVMTags(configSpec, []string{"app:web"}, ns)
+		})
+
+		It("creates no Tag and writes no owner reference", func() {
+			Expect(resultErr).ToNot(HaveOccurred())
+
+			var tagList vspherepolv1.TagList
+			Expect(k8sClient.List(vmCtx, &tagList, ctrlclient.InNamespace(ns))).To(Succeed())
+			Expect(tagList.Items).To(HaveLen(1))
+			Expect(tagList.Items[0].OwnerReferences).To(BeEmpty())
+		})
+	})
+
+	When("no Tag exists for the VM's label (first VM in a relationship)", func() {
+		BeforeEach(func() {
+			initObjs = nil
+		})
+
+		It("emits nothing", func() {
+			Expect(resultErr).ToNot(HaveOccurred())
+			Expect(configSpec.TagSpecs).To(BeEmpty())
+		})
+	})
+
+	When("a Tag exists for the same key but a different value", func() {
+		BeforeEach(func() {
+			initObjs = []ctrlclient.Object{dummyTag("app", "other-value")}
+		})
+
+		It("emits nothing", func() {
+			Expect(resultErr).ToNot(HaveOccurred())
+			Expect(configSpec.TagSpecs).To(BeEmpty())
+		})
+	})
+
+	When("configureExtraConfig is true", func() {
+		BeforeEach(func() {
+			initObjs = []ctrlclient.Object{dummyTag("app", "web")}
+			configureExtraConfig = true
+		})
+
+		It("appends the ExtraConfig record for the emitted set", func() {
+			Expect(resultErr).ToNot(HaveOccurred())
+
+			var found bool
+
+			for _, ov := range configSpec.ExtraConfig {
+				if opt, ok := ov.(*vimtypes.OptionValue); ok &&
+					opt.Key == virtualmachine.ExtraConfigVMTagsKey {
+
+					found = true
+
+					Expect(opt.Value).To(Equal("app:web"))
+				}
+			}
+
+			Expect(found).To(BeTrue())
+		})
+	})
+
+	When("configureExtraConfig is false", func() {
+		BeforeEach(func() {
+			initObjs = []ctrlclient.Object{dummyTag("app", "web")}
+			configureExtraConfig = false
+		})
+
+		It("does not append the ExtraConfig record", func() {
+			Expect(resultErr).ToNot(HaveOccurred())
+			Expect(configSpec.ExtraConfig).To(BeEmpty())
+		})
 	})
 })

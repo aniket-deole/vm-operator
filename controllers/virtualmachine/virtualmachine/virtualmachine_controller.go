@@ -56,6 +56,7 @@ import (
 	"github.com/vmware-tanzu/vm-operator/pkg/vmconfig/diskpromo"
 	vmconfextraconfig "github.com/vmware-tanzu/vm-operator/pkg/vmconfig/extraconfig"
 	vmconfnetworkextraconfig "github.com/vmware-tanzu/vm-operator/pkg/vmconfig/networkextraconfig"
+	vmconfvmtags "github.com/vmware-tanzu/vm-operator/pkg/vmconfig/vmtags"
 )
 
 const (
@@ -373,6 +374,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if pkgcfg.FromContext(ctx).Features.TelcoVMServiceAPI {
 		ctx = vmconfig.Register(ctx, vmconfextraconfig.New())
 		ctx = vmconfig.Register(ctx, vmconfnetworkextraconfig.New())
+	}
+
+	if pkgcfg.FromContext(ctx).Features.TaggingAPI {
+		ctx = vmconfig.Register(ctx, vmconfvmtags.New())
 	}
 
 	ctx = ctxop.WithContext(ctx)

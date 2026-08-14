@@ -7,6 +7,12 @@ package vmtags
 import (
 	"context"
 	"fmt"
+	"strings"
+
+	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vim25"
+	"github.com/vmware/govmomi/vim25/mo"
+	vimtypes "github.com/vmware/govmomi/vim25/types"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -21,7 +27,63 @@ import (
 	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	"github.com/vmware-tanzu/vm-operator/pkg/providers/vsphere/virtualmachine"
 	kubeutil "github.com/vmware-tanzu/vm-operator/pkg/util/kube"
+	"github.com/vmware-tanzu/vm-operator/pkg/vmconfig"
 )
+
+type reconciler struct{}
+
+var _ vmconfig.Reconciler = reconciler{}
+
+// New returns a vmconfig.Reconciler that reconciles this VM's affinity Tag
+// ownership and vCenter tag set.
+func New() vmconfig.Reconciler {
+	return reconciler{}
+}
+
+func (r reconciler) Name() string {
+	return "vmtags"
+}
+
+func (r reconciler) OnResult(
+	_ context.Context,
+	_ *vmopv1.VirtualMachine,
+	_ mo.VirtualMachine,
+	_ error) error {
+
+	return nil
+}
+
+func (r reconciler) Reconcile(
+	ctx context.Context,
+	k8sClient ctrlclient.Client,
+	vimClient *vim25.Client,
+	vm *vmopv1.VirtualMachine,
+	moVM mo.VirtualMachine,
+	configSpec *vimtypes.VirtualMachineConfigSpec) error {
+
+	if ctx == nil {
+		panic("context is nil")
+	}
+	if k8sClient == nil {
+		panic("k8sClient is nil")
+	}
+	if vimClient == nil {
+		panic("vimClient is nil")
+	}
+	if vm == nil {
+		panic("vm is nil")
+	}
+	if configSpec == nil {
+		panic("configSpec is nil")
+	}
+
+	ownedTags, err := ReconcileTagCRs(ctx, k8sClient, vm)
+	if err != nil {
+		return err
+	}
+
+	return ReconcileTagSpecs(ctx, k8sClient, vm, moVM, configSpec, ownedTags)
+}
 
 // ReconcileTagCRs computes the label key/value pairs this VM owns — every
 // pair its own spec.affinity references, regardless of whether the VM
@@ -191,6 +253,165 @@ func ensureOwnedTag(
 	}
 
 	return tag, nil
+}
+
+// ReconcileTagSpecs computes the vCenter tag set this VM should carry — the
+// union of the Tags matching its own labels and the Tags ReconcileTagCRs
+// just ensured for it, since this pass's List cannot yet observe a Create
+// issued earlier in the same reconcile — and emits the TagSpec add/remove
+// diff against this feature's own ExtraConfig record.
+//
+// Desired-set membership is driven only by the VM's labels and the
+// existence of a matching Tag; it deliberately does not consult the VM's
+// own spec.affinity, since tag carriage and ownership are different
+// predicates. The diff is
+// taken against ExtraConfigVMTagsKey rather than the VM's live
+// attached-tag list, because that list is tag URNs and cannot be matched
+// to name+category tags (pkgctx.GetVMTags is not used here for that
+// reason).
+func ReconcileTagSpecs(
+	ctx context.Context,
+	k8sClient ctrlclient.Client,
+	vm *vmopv1.VirtualMachine,
+	moVM mo.VirtualMachine,
+	configSpec *vimtypes.VirtualMachineConfigSpec,
+	ownedTags []vspherepolv1.Tag) error {
+	if ctx == nil {
+		panic("context is nil")
+	}
+
+	if k8sClient == nil {
+		panic("k8sClient is nil")
+	}
+
+	if vm == nil {
+		panic("vm is nil")
+	}
+
+	if configSpec == nil {
+		panic("configSpec is nil")
+	}
+
+	desired, err := desiredTagSet(ctx, k8sClient, vm, ownedTags)
+	if err != nil {
+		return err
+	}
+
+	var (
+		haveBeen []string
+		av       string
+	)
+
+	if moVM.Config != nil {
+		ec := object.OptionValueList(moVM.Config.ExtraConfig)
+
+		av, _ = ec.GetString(virtualmachine.ExtraConfigVMTagsKey)
+		if av != "" {
+			haveBeen = strings.Split(av, ",")
+		}
+	}
+
+	haveBeenSet := sets.New(haveBeen...)
+
+	toAdd := sets.List(desired.Difference(haveBeenSet))
+	toRem := sets.List(haveBeenSet.Difference(desired))
+
+	if len(toAdd) == 0 && len(toRem) == 0 {
+		// The desired set is unchanged: emit nothing, so a fan-out
+		// reconcile that changes nothing stays read-only.
+		return nil
+	}
+
+	for _, tag := range toRem {
+		configSpec.TagSpecs = append(configSpec.TagSpecs, vimtypes.TagSpec{
+			ArrayUpdateSpec: vimtypes.ArrayUpdateSpec{
+				Operation: vimtypes.ArrayUpdateOperationRemove,
+			},
+			Id: vimtypes.TagId{
+				NameId: &vimtypes.TagIdNameId{
+					Tag:      tag,
+					Category: vm.Namespace,
+				},
+			},
+		})
+	}
+
+	for _, tag := range toAdd {
+		configSpec.TagSpecs = append(configSpec.TagSpecs, vimtypes.TagSpec{
+			ArrayUpdateSpec: vimtypes.ArrayUpdateSpec{
+				Operation: vimtypes.ArrayUpdateOperationAdd,
+			},
+			Id: vimtypes.TagId{
+				NameId: &vimtypes.TagIdNameId{
+					Tag:      tag,
+					Category: vm.Namespace,
+				},
+			},
+		})
+	}
+
+	configSpec.ExtraConfig = append(configSpec.ExtraConfig, &vimtypes.OptionValue{
+		Key:   virtualmachine.ExtraConfigVMTagsKey,
+		Value: strings.Join(sets.List(desired), ","),
+	})
+
+	return nil
+}
+
+// desiredTagSet computes the "<key>:<value>" vCenter tag names this VM
+// should carry: the union of the Tags matching this VM's own labels — one
+// Get per distinct label key on the derived Tag name, never an unfiltered
+// namespace list — and the subset of the Tags ReconcileTagCRs ensured
+// earlier in this reconcile that this VM also carries, which this pass's
+// Get cannot yet observe from the cache.
+//
+// ownedTags can include pairs the VM does not carry — a
+// VmToVmGroupsAntiAffinity pair the VM references without belonging to it
+// itself, for example — because ownership and tag carriage are different
+// predicates. Those must not leak into
+// the desired set, so the union below re-applies the same carriage check
+// as the loop above it. The union exists purely to recover a same-reconcile
+// cache miss for a pair the VM both owns and carries, never to widen the
+// desired set beyond what the VM's own labels justify.
+func desiredTagSet(
+	ctx context.Context,
+	k8sClient ctrlclient.Client,
+	vm *vmopv1.VirtualMachine,
+	ownedTags []vspherepolv1.Tag) (sets.Set[string], error) {
+	desired := sets.New[string]()
+
+	vmLabels := kubeutil.RemoveVMOperatorLabels(vm.Labels)
+
+	for key, value := range vmLabels {
+		name := virtualmachine.TagResourceName(key, value)
+
+		tag := &vspherepolv1.Tag{}
+		err := k8sClient.Get(
+			ctx,
+			ctrlclient.ObjectKey{Namespace: vm.Namespace, Name: name},
+			tag)
+		switch {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("failed to get Tag %q: %w", name, err)
+		}
+
+		desired.Insert(virtualmachine.VCenterTagName(key, value))
+	}
+
+	for i := range ownedTags {
+		tag := &ownedTags[i]
+		if v, ok := vmLabels[tag.Spec.Key]; !ok || v != tag.Spec.Value {
+			// This VM owns the Tag by reference alone and does not carry
+			// the pair: it does not get the vCenter tag.
+			continue
+		}
+
+		desired.Insert(virtualmachine.VCenterTagName(tag.Spec.Key, tag.Spec.Value))
+	}
+
+	return desired, nil
 }
 
 // pruneStaleOwnership removes this VM's owner reference from every Tag it

@@ -250,6 +250,18 @@ func (vs *vSphereVMProvider) vmGroupGetVMPlacementConfigSpec(
 			return nil, err
 		}
 
+		if pkgcfg.FromContext(vmCtx).Features.TaggingAPI {
+			if err := virtualmachine.AppendExistingTagSpecs(
+				vmCtx,
+				vs.k8sClient,
+				vmCtx,
+				&placementConfigSpec,
+				!virtualmachine.RecordTagInExtraConfig); err != nil {
+
+				return nil, err
+			}
+		}
+
 		return &placementConfigSpec, nil
 	}
 }
