@@ -46,6 +46,10 @@ func SkipUnlessWindowsFSSEnabled(ctx context.Context, client ctrlclient.Client, 
 	skipUnlessFSSEnabled(ctx, client, config.GetVariable("VMOPNamespace"), config.GetVariable("VMOPDeploymentName"), config.GetVariable("VMOPManagerCommand"), config.GetVariable("EnvFSSWindowsSysprep"))
 }
 
+func SkipUnlessTaggingAPIFSSEnabled(ctx context.Context, client ctrlclient.Client, config *config.E2EConfig) {
+	skipUnlessFSSEnabled(ctx, client, config.GetVariable("VMOPNamespace"), config.GetVariable("VMOPDeploymentName"), config.GetVariable("VMOPManagerCommand"), config.GetVariable("EnvFSSTaggingAPI"))
+}
+
 func skipUnlessFSSEnabled(ctx context.Context, client ctrlclient.Client, deploymentNS, deploymentName, command, fss string) {
 	envs, err := utils.GetCommandEnvVars(ctx, client, deploymentNS, deploymentName, command)
 	Expect(err).To(Succeed(), "%q FSS cannot not be fetched for command %q", fss, command)
