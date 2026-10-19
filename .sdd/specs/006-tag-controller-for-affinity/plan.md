@@ -9,7 +9,15 @@
 
 ## Summary
 
-Introduce a namespace-scoped `Tag` resource in the `vsphere.policy.vmware.com/v1alpha1` API that records which label key/value pairs currently participate in affinity in a namespace and which VMs own that participation. A new `vmconfig` reconciler on the VM path — invoked from **two** call sites in `doReconfigure` that straddle the vSphere policy reconciler — creates those resources, maintains its own VM's owner reference, and emits the vCenter `TagSpec` add/remove diff for **every** participating label the VM carries — including labels the VM does not itself reference. A new `Tag` controller owns `Tag` status, its label mirror, and its delete-at-zero-owners decision. Fan-out to the VMs a `Tag` change affects is a **watch**: the VM controller gains a feature-gated `Watches(&Tag{}, …)` whose mapper resolves a `Tag` to the VMs carrying its label through a field index. All of it is gated on a new `TaggingAPI` feature flag, itself gated behind the `PlacementPoliciesForVMServiceVmsV3` Supervisor capability (spec G13). `spec.affinity` stays immutable (spec NG8); what changes on a live VM is its labels.
+Introduce a namespace-scoped `Tag` resource in the `vsphere.policy.vmware.com/v1alpha1` API that records which label key/value pairs currently participate in affinity in a namespace and which VMs own that participation. A new `vmconfig` reconciler on the VM path — invoked from **two** call sites in `doReconfigure` that straddle the vSphere policy reconciler — creates those resources, maintains its own VM's owner reference, and emits the vCenter `TagSpec` add/remove diff for **every** participating label the VM carries — including labels the VM does not itself reference. A new `Tag` controller owns `Tag` status, its label mirror, and its delete-at-zero-owners decision. Fan-out to the VMs a `Tag` change affects is a **watch**: the VM controller gains a feature-gated `Watches(&Tag{}, …)` whose mapper resolves a `Tag` to the VMs carrying its label through a field index. All of it is gated on a new `TaggingAPI` feature flag, itself gated behind the `CapabilityKeyVMHardAffinityDuringExecution` Supervisor capability (spec G13). `spec.affinity` stays immutable (spec NG8); what changes on a live VM is its labels.
+
+## Delivery status (2026-10-17)
+
+PR2a's Tag watch, VM label index, mapper, predicate, and integration tests are integrated with PR2b's vCenter tag reconciliation, placement/create emission, ExtraConfig tracking, and cleanup. The remaining PR3 E2E scenarios and vCenter assertions are integrated in the same working tree, preserving the existing ownership-test helpers. The anti-affinity E2E remains pending until zonal policies are persisted at create time; all E2Es remain experimental pending real-cluster validation.
+
+This branch retains `TagName(key, value)` for the vCenter tag name and `TagResourceName(namespace, key, value)` for the Kubernetes resource name. Ownership eligibility continues to use `CalculateAffinityConstraints`; tag carriage continues to depend on labels and the existence of a namespace-local Tag. The session dispatch order is ownership, vSphere policies, then the vCenter tag diff. Registration supplies the `OnResult` hook; it does not dispatch a second reconciliation.
+
+Validation passed for the root build, scoped tag/index unit tests, config-spec/cleanup/helper regressions, VM Tag-watch envtest, the full Tag controller suite, scoped provider create/config-spec/delete/cleanup and affinity group-placement regressions, and vet of the touched root packages and E2E module. Real-cluster E2E execution remains outstanding.
 
 ## Technical context
 
@@ -17,7 +25,7 @@ Introduce a namespace-scoped `Tag` resource in the `vsphere.policy.vmware.com/v1
 - **API version(s) touched**: `vsphere.policy.vmware.com/v1alpha1` (new type `Tag`). No change to any `vmoperator.vmware.com` version; `api/` is untouched.
 - **Modules touched**: root module (`controllers/`, `pkg/`, `webhooks/`, `config/`, `test/`), and `external/vsphere-policy` (new type + regenerated deepcopy).
 - **New dependencies**: none.
-- **Feature flag**: `pkgcfg.FromContext(ctx).Features.TaggingAPI`, gated behind the Supervisor capability `PlacementPoliciesForVMServiceVmsV3` (spec G13).
+- **Feature flag**: `pkgcfg.FromContext(ctx).Features.TaggingAPI`, gated behind the Supervisor capability `CapabilityKeyVMHardAffinityDuringExecution` (spec G13).
 - **Depends on**: no other feature flag. In particular the fan-out is a watch on `Tag`, not a `cource` channel, so it does **not** depend on `AsyncSignalEnabled` (D19). It also does **not** depend on the VM update flow's attached-tag fetch (step 3 of the documented VM update reconcile order): that fetch yields tag URNs with no name or category, so the diff is taken against this feature's own ExtraConfig record instead (D12, `research.md`).
 - **Interaction with the pre-existing flags**: `TaggingAPI` decides *whether the `Tag`-driven path runs*; it does **not** change which affinity terms are eligible. Term eligibility still comes from `CalculateAffinityConstraints`, i.e. `Features.VMPlacementPolicies` for zone-topology terms and `Features.VMAffinityDuringExecution` for host-topology terms, plus the VKS/zone-label exclusions. Consequence: with `TaggingAPI` on but both of those off, `AffinityLabelPairs` returns nothing and the feature is inert. That is deliberate — this spec does not re-open which terms are eligible (spec "Edge cases") — but it means enabling this flag alone is not sufficient to exercise the feature, which matters for test setup and for the capability wiring (spec G13).
 
@@ -150,9 +158,9 @@ case "Tag":
     }
 ```
 
-This is worth doing for its own sake — consistency with every other feature-gated CRD, and no stray API surface on a Supervisor that was never meant to serve it — and it gives the E2E suite a cluster-observable signal to gate on until the `PlacementPoliciesForVMServiceVmsV3` capability lookup lands (spec G13, [`e2e.md`](./e2e.md) "Gating"). Note precisely what that signal is worth, because the deletion half is weaker than the creation half:
+The CRD gate keeps API availability consistent with the feature flag. E2Es query the Supervisor capability backing `Features.TaggingAPI` and separately check CRD availability (spec G13, [`e2e.md`](./e2e.md) "Gating"). CRD lifecycle follows these rules:
 
-- **Creation is unconditional on the flag.** Flag on → the CRD is created if absent. So a Supervisor that has never had `TaggingAPI` enabled has no `Tag` CRD, and its absence is a sound reason for the suite to skip.
+- **Creation requires the feature flag.** Flag on → the CRD is created if absent. So a Supervisor that has never had `TaggingAPI` enabled has no `Tag` CRD, and its absence is a sound reason for the suite to skip.
 - **Deletion is doubly gated.** `updateOrDeleteUnstructured` only deletes when `pkgcfg.CRDCleanupEnabled` is also true, and that defaults to **`false`** (`pkg/config/default.go:66`) — flag-off merely logs "Skipped CRD deletion". So a Supervisor where the flag was once on and is now off *keeps* the CRD. CRD **presence therefore does not prove the feature is currently enabled**; only absence is conclusive.
 
 The default-`false` cleanup gate is also what keeps this consistent with spec "Edge cases", which says existing `Tag` resources are left in place when the flag is turned off: in the default configuration the CRD survives, so the `Tag` resources do too.
@@ -171,7 +179,7 @@ A new file **next to the existing `affinity.go`, in the same package**, so the h
 
 - `AffinityLabelPairs(vmCtx, constraints) []LabelPair` — the label key/value pairs the VM's own `spec.affinity` references. This is today's `extractAffinityLabelsFromVM` logic, returning structured pairs instead of `"key:value"` strings, so the caller can build both a `Tag` spec and a vCenter tag name from one source of truth. `affinity.go`'s existing function is refactored to call this, so the flag-off path and the flag-on path cannot diverge in what "referenced by affinity" means.
 - `TagResourceName(namespace, key, value string) string` — `"tag-" + pkgutil.XXHash64Hex(namespace + ":" + key + ":" + value)`.
-- `VCenterTagName(key, value string) string` — `key + ":" + value`.
+- `TagName(key, value string) string` — `key + ":" + value`.
 - `ExtraConfigVMTagsKey` — the ExtraConfig key the tag record uses (see step 5 and "Platform-resource cleanup"; the placement is deliberate, see the import-direction note below).
 
 `AffinityRuleConstraints` and `CalculateAffinityConstraints` **stay exactly where they are** in `affinity.go` / `configspec.go` — nothing is moved, aliased, or re-signatured, so all 31 existing references, including the 18 in `configspec_test.go`, are untouched. That matters beyond churn: spec SC-006 leans on the pre-existing suites passing *unchanged* as the flag-off regression baseline. The new reconciler calls `CalculateAffinityConstraints(vmCtx, false)` so eligibility of host- vs zone-topology terms is decided by exactly the same rules as today (spec "Edge cases", VKS/zone-label case).
@@ -421,7 +429,7 @@ An unexported `validator` implementing the repository's `builder.Validator` shap
 
 ### 7. Every emission point is gated: flag off = today, flag on = the `Tag`-driven path
 
-`genConfigSpecTagSpecsFromVMLabels` is called from two functions, but those two functions serve **four** distinct purposes, and the flag-on replacement differs per purpose. Mechanism A is gated off in both:
+`genConfigSpecTagSpecsFromVMLabels` is called from two functions, but those two functions serve **four** distinct purposes, and the flag-on replacement differs per purpose. Mechanism A is gated off in `CreateConfigSpec`:
 
 ```go
 if !pkgcfg.FromContext(vmCtx).Features.TaggingAPI {
@@ -429,13 +437,13 @@ if !pkgcfg.FromContext(vmCtx).Features.TaggingAPI {
 }
 ```
 
-inside `CreateConfigSpec` and `CreateConfigSpecForPlacement`. `genConfigSpecAffinityPolicies` is untouched at both sites (spec NG5). With the flag off, behavior is byte-for-byte today's at every point (spec G11, SC-006).
+inside `CreateConfigSpec`. `CreateConfigSpecForPlacement` retains affinity-derived tags regardless of `TaggingAPI`, since fresh relationships need those tags before a Kubernetes Tag exists. When `TaggingAPI` is enabled, the affinity tag generator skips matching name/category additions inherited from create; `AppendExistingTagSpecs` then adds existing-resource tags without duplicates. `genConfigSpecAffinityPolicies` is untouched at both sites (spec NG5). With the flag off, behavior is byte-for-byte today's at every point (spec G11, SC-006).
 
 With the flag on:
 
 | Emission point | Caller | Flag-on behavior |
 |----------------|--------|------------------|
-| Placement | `vmprovider_vm.go:1786`, `vmprovider_vmgroup.go:245` | `AppendExistingTagSpecs`, **read-only** |
+| Placement | `vmprovider_vm.go:1786`, `vmprovider_vmgroup.go:245` | Affinity-derived carried labels plus `AppendExistingTagSpecs`, deduplicated and **read-only** |
 | Create | `vmprovider_vm.go:2581` (`createArgs`) | `AppendExistingTagSpecs`, **read-only**, plus the ExtraConfig record |
 | Update | `vmprovider_vm.go:3274` (`updateArgs`) | nothing here — `doReconfigure` owns it |
 | Resize | `vmprovider_vm.go:3340` (`resizeArgs`) | nothing here — `doReconfigure` owns it |
@@ -462,7 +470,7 @@ For each of the VM's own labels (after `kubeutil.RemoveVMOperatorLabels`), `Get`
 - **Add-only.** There is nothing attached to a VM that does not exist yet, and at create there is nothing to remove.
 - `configureExtraConfig` appends the `ExtraConfigVMTagsKey` record for the emitted set. Call sites pass the exported `RecordTagInExtraConfig` constant, negated at the placement sites, so the intent reads at the call rather than as a bare boolean. **True at create, false at placement**: at create the record must match what was applied, or the first update reconcile reads an empty `haveBeen`, re-emits adds for tags already attached, and issues a reconfigure that changes nothing. The placement `ConfigSpec` is ephemeral and never persisted, so it needs no record.
 
-Ownership is therefore always established by `ReconcileTagCRs` on the first update reconcile, never at placement or create. The consequence is stated as an edge case in `spec.md`: the **first** VM to reference a label pair is placed without that tag, because no `Tag` resource exists for it yet — it gets the tag once its own reconcile creates the resource. Subsequent VMs joining an established relationship are placed with the tag, which is the case that matters for placement quality.
+Ownership is established by `ReconcileTagCRs` on the first update reconcile, never at placement or create. Placement includes eligible affinity-derived tags for labels the VM carries even when no Tag resource exists yet, plus tags backed by existing resources. This preserves initial affinity and anti-affinity enforcement for fresh single-VM and group relationships. Placement-only additions do not alter the create config or its ExtraConfig record.
 
 ### 8. Platform-resource cleanup — `cleanup.go`
 
@@ -534,10 +542,12 @@ Per `testing-standards.md`: one `_test.go` and one `_suite_test.go` per package,
 - `pkg/providers/vsphere/virtualmachine/` existing affinity/configspec tests — extended so the flag-off path is asserted unchanged and the flag-on path emits no create-time tag specs (spec SC-006).
 - `pkg/providers/vsphere/virtualmachine/cleanup_test.go` — `removeTagAssociations` emits a `NameId` removal per entry recorded in `vmservice.tags` when `TaggingAPI` is on, leaves mechanism B's UUID removals intact when both flags are on, and emits nothing for this feature when the flag is off.
 
+The G12 reconciler tests force both concurrent-create adoption (`AlreadyExists`) and deletion between a cached Get and an ownership patch (`NotFound`). The failed ownership write is returned for retry; a subsequent reconcile creates a new Tag with the same name and only the current owner. Combined with the E2E that confirms Tag disappearance before replacement, these cases cover G12 without requiring an uncontrolled deletion/replacement race in E2E.
+
 ### Integration (`testlabels.EnvTest`)
 
-- `controllers/vspherepolicy/tag/tag_controller_test.go` (envtest) — real garbage collection: deleting the last owning VM removes the `Tag`; deleting one of two owners does not; concurrent owner-reference writes from two VMs both survive (the optimistic-lock guarantee); all three field indexes resolve as specified, including the negative cases for `metadata.labels.keyValue` (same key with a different value, and VMs in another namespace); a `Tag` write that only touches status or owner references bumps no VM `resourceVersion` (`Consistently`); the CRD's printer columns and status subresource behave as generated. The generated CRD needs no test-suite wiring — `test/builder/test_suite.go` already loads the whole `config/crd/external-crds` directory into envtest.
-- `controllers/virtualmachine/virtualmachine/virtualmachine_controller_test.go` (envtest) — the watch wiring itself, which no unit test covers: with `TaggingAPI` on, creating a `Tag` that matches a label-only VM's label causes that VM to be reconciled, and deleting it does so again. This is the one place the index registration, the mapper and the predicate are exercised through a real manager, so a mis-wired `Watches` or an unregistered index fails here rather than on a Supervisor.
+- `controllers/vspherepolicy/tag/tag_controller_test.go` (envtest) — real garbage collection: deleting the last owning VM removes the `Tag`; deleting one of two owners does not; concurrent owner-reference writes from two VMs both survive (the optimistic-lock guarantee); all three field indexes resolve as specified, including the negative cases for `metadata.labels.keyValue` (same key with a different value, and VMs in another namespace); a `Tag` write that only touches status, owner references, or the label mirror triggers no VM provider call and bumps no VM `resourceVersion` (`Consistently`), after initial reconciles settle with retry timers outside the observation window; the CRD's printer columns and status subresource behave as generated. The generated CRD needs no test-suite wiring — `test/builder/test_suite.go` already loads the whole `config/crd/external-crds` directory into envtest.
+- `controllers/virtualmachine/virtualmachine/virtualmachine_controller_test.go` (envtest) — the watch wiring itself, which no unit test covers: with `TaggingAPI` on, creating a `Tag` that matches a label-only VM's label causes that VM to be reconciled, and deleting it does so again. This is the one place the index registration, the mapper and the predicate are exercised through a real manager, so a mis-wired `Watches` or an unregistered index fails here rather than on a Supervisor. The fake provider marks the VM created, retry/resync timers are outside the test window, and stable provider-call baselines separate Tag create and delete events. Negative checks use isolated Go overlays: removing the Tag watch must fail the wiring test, and admitting Tag updates must fail the no-op guard.
 
 ### E2E
 
@@ -545,7 +555,7 @@ Mandatory (spec G1-G10 are all cluster-observable). Specified in [`e2e.md`](./e2
 
 ## Rollout / migration
 
-- **Feature flag**: `pkgcfg.Features.TaggingAPI` is gated behind the `PlacementPoliciesForVMServiceVmsV3` Supervisor capability (spec G13). The follow-ups in `research.md` cover adding the `CapabilityKeyPlacementPoliciesForVMServiceVmsV3` entry to `pkg/config/capabilities/capabilities.go`.
+- **Feature flag**: `pkgcfg.Features.TaggingAPI` defaults to false and is gated by `CapabilityKeyVMHardAffinityDuringExecution` in `pkg/config/capabilities/capabilities.go` (spec G13). The same capability activates `Features.VMHardAffinityDuringExecution`. Tag E2Es query that backing capability without a deployment environment-variable check.
 - **No schema upgrade / backfill**: nothing in `api/` changes and no VM field is backfilled. On a Supervisor where the flag is turned on for the first time, every VM's next reconcile converges its tags and creates whatever `Tag` resources its affinity implies — the feature is level-triggered, so no migration job is needed.
 - **Turning the flag off** stops the `Tag`-driven path; already-applied vCenter tags and existing `Tag` resources are left in place (spec "Edge cases"), and mechanism A resumes at all four emission points. This is a deliberate non-cleanup: proactively stripping tags on flag-off would disrupt placement for running VMs.
 - **Partner comms**: none. The `Tag` API is internal (spec NG6) and DevOps-facing behavior only gains capability (affinity now includes label-only VMs, and relabeling a running VM converges its tags). No user-facing documentation change is needed beyond the release note.

@@ -38,10 +38,10 @@ func SkipUnlessInfraIs(clusterInfra, requiredInfra string) {
 	}
 }
 
-func SkipUnlessTaggingAPIFSSEnabled(ctx context.Context, client ctrlclient.Client, config *config.E2EConfig) {
-	if !utils.IsFssEnabled(ctx, client, config.GetVariable("VMOPNamespace"), config.GetVariable("VMOPDeploymentName"), config.GetVariable("VMOPManagerCommand"), config.GetVariable("EnvFSSTaggingAPI")) {
-		framework.SkipInternalf(1, "skip the test as the TaggingAPI FSS is not enabled")
-	}
+// SkipUnlessTaggingAPIEnabled skips when the Supervisor capability backing
+// Features.TaggingAPI is disabled.
+func SkipUnlessTaggingAPIEnabled(ctx context.Context, vmSvcClusterProxy *common.VMServiceClusterProxy) {
+	SkipUnlessSupervisorCapabilityEnabled(ctx, vmSvcClusterProxy, consts.VMHardAffinityDuringExecutionCapabilityName)
 }
 
 func SkipUnlessStretchSupervisorIsEnabled() {

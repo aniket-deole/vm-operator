@@ -87,7 +87,7 @@ status:
 | `metadata.name` | VM reconcile path, on create | `"tag-" + XXHash64Hex("<metadata.namespace>:<spec.key>:<spec.value>")`. See "Name derivation". |
 | `metadata.namespace` | VM reconcile path, on create | The VM's namespace. Doubles as the vCenter Tag Category. |
 | `metadata.labels[<spec.key>]` | VM reconcile path, on create | Mirror of `spec.value`, so an admin can run `kubectl get tags -l app=nginx`. This mirror is **not** what makes the controllers' queries efficient — see "Query surface" below. |
-| `metadata.ownerReferences` | VM reconcile path — each VM writes **only its own entry** | One non-controller reference per owning VM (`controller: false`, `blockOwnerDeletion: false`). An owner is a VM whose own `spec.affinity` references the pair — carriage is not required. A VM that merely carries the label without referencing it is tagged in vCenter but is **not** an owner. Because `spec.affinity` is immutable, ownership — once established on a VM's first reconcile — lasts for that VM's lifetime. Ownership is not the same predicate as tag carriage; see the note below. |
+| `metadata.ownerReferences` | VM reconcile path — each VM writes **only its own entry** | One non-controller reference per owning VM (`controller: false`, `blockOwnerDeletion: false`). An owner is a VM whose own `spec.affinity` contains an eligible term referencing the pair — current carriage is not required. A VM that merely carries the label without referencing it is tagged in vCenter but is **not** an owner. With immutable `spec.affinity`, fixed zone assignment and CAPI/CAPV/CAPW identity, and unchanged feature capabilities, established ownership lasts for the VM's lifetime. Ownership is not the same predicate as tag carriage; see the note below. |
 
 `Tag` carries **no finalizer** (D10). Deletion at zero owners is a plain, atomic `Delete` — see invariant 5 below.
 
@@ -176,16 +176,18 @@ Two different predicates, both defined in `spec.md` "Ownership vs. tag carriage"
 
 | | Predicate | Recorded in |
 |---|-----------|-------------|
-| **Ownership** | VM's own `spec.affinity` references the pair — carriage not required | `metadata.ownerReferences` |
+| **Ownership** | An eligible term in the VM's own `spec.affinity` references the pair — current carriage not required | `metadata.ownerReferences` |
 | **Tag carriage** | VM carries the label **AND** a `Tag` for the pair exists in the namespace | vCenter only — nothing on the `Tag` records which VMs carry it |
+
+When declaring `VmVmAffinity` or `VmVmAntiAffinity`, the VM must carry the labels referenced by the rule. `VmToVmGroupsAntiAffinity` permits references to target-group labels absent from the declaring VM. Ownership derives from eligible affinity references in both cases; subsequent ordinary participating-label changes affect carriage only. Eligibility follows the existing host/zone rules and feature capabilities, with zone assignment and CAPI/CAPV/CAPW identity fixed for the supported VM lifecycle.
 
 Neither predicate is a subset or superset of the other in general: a VM can own a `Tag` without carrying the vCenter tag (a `VmToVmGroupsAntiAffinity` reference to a pair it does not carry), and a VM can carry the vCenter tag without being an owner (a label-only VM, US2). Nothing on the `Tag` enumerates the tagged VMs: that set is recomputed from live state on each VM's own reconcile, which is what keeps the resource small and free of a second source of truth.
 
 ## Lifecycle invariants
 
 1. **Creation**: created by the VM reconcile path, always with at least one owner reference (the VM whose reconcile created it) and always with its label mirror set.
-2. **Ownership add**: a VM adds **only its own** owner-reference entry, for every pair its own `spec.affinity` references — carriage is not required.
-3. **Ownership remove**: a VM removes **only its own** entry when it is being deleted (before its finalizer is released). Because `spec.affinity` is immutable, this is the only trigger: a live VM's set of referenced pairs cannot shrink, so its ownership cannot be lost by relabeling.
+2. **Ownership add**: a VM adds **only its own** owner-reference entry, for every pair referenced by an eligible term in its own `spec.affinity` — current carriage is not required.
+3. **Ownership remove**: a VM removes **only its own** entry when it is being deleted (before its finalizer is released). Under the supported lifecycle assumptions of immutable `spec.affinity`, fixed zone assignment and CAPI/CAPV/CAPW identity, and unchanged feature capabilities, deletion is the ownership-removal trigger. Ordinary participating-label changes do not remove ownership. Existing host/zone eligibility checks remain applicable.
 4. **Concurrent ownership writes**: every ownership write is a patch built with `client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})`, skipped entirely when `apiequality.Semantic.DeepEqual` reports no change to `ownerReferences`. A conflict is returned and retried by the next reconcile. A plain merge patch is **not** acceptable: `ownerReferences` is a list field and a merge patch would replace it wholesale, silently dropping a concurrent writer's entry.
 5. **Deletion at zero owners**: the `Tag` controller `Delete`s the `Tag` when it observes an empty `ownerReferences` list, preconditioned on the `ResourceVersion` it read. `Tag` carries no finalizer (D10), so this delete is atomic — there is no persisted `deletionTimestamp` state to observe, only the resulting delete event (invariant 6). The precondition is what keeps this safe: if a VM concurrently added an owner reference after this reconcile's `Get`, the `Delete` fails with a conflict instead of destroying the newly-owned object, and the next reconcile re-reads the fresh state and skips deletion. Ordinary owner-reference garbage collection is a backstop that covers only the "all owner VMs deleted" case — it does **not** delete an object whose owner list was emptied while those owners still exist. See [`research.md`](./research.md) "Owner-reference garbage collection", and the RBAC requirements below for cleanup authorization.
 6. **Deletion fan-out**: every VM in the namespace carrying `spec.key=spec.value` is enqueued by the VM controller's `Tag` watch — via the `metadata.labels.keyValue` index, not a namespace scan — so label-only VMs drop the vCenter tag (spec G5). The single delete event is sufficient: a woken VM's desired-set computation no longer finds a matching `Tag` (`Get` returns `NotFound`), so it emits `TagSpec{remove}`. The `Tag` controller itself enqueues nothing on any path (D16, D19).
@@ -320,7 +322,7 @@ Resulting `Tag` (`ns-1/tag-<hash-of-tier:db>`): one owner reference to `vm-a`, e
 
 ### US3 — label participation dropped
 
-`spec.affinity` is immutable (spec NG8), so what changes here is `metadata.labels`. Ownership follows the affinity reference alone, so dropping a label never drops ownership — only the VM's own tag carriage reacts.
+`spec.affinity` is immutable (spec NG8), so what changes here is `metadata.labels`. Ownership follows eligible affinity references. With fixed zone assignment and CAPI/CAPV/CAPW identity and unchanged feature capabilities, dropping an ordinary participating label preserves ownership and changes only the VM's own tag carriage.
 
 **Case 1 — `vm-a` drops a label it still references.** `vm-a` drops label `app: nginx` while its `spec.affinity` still references it, and `vm-b` also references and (still) carries it:
 

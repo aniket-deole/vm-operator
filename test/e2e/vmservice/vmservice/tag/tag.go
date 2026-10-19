@@ -24,7 +24,6 @@ import (
 
 	"github.com/vmware-tanzu/vm-operator/test/e2e/vmservice/common"
 	e2eConfig "github.com/vmware-tanzu/vm-operator/test/e2e/vmservice/config"
-	"github.com/vmware-tanzu/vm-operator/test/e2e/vmservice/consts"
 	"github.com/vmware-tanzu/vm-operator/test/e2e/vmservice/skipper"
 	"github.com/vmware-tanzu/vm-operator/test/e2e/wcpframework"
 )
@@ -99,7 +98,7 @@ func Spec(ctx context.Context, inputGetter func() SpecInput) {
 
 		svClusterProxy = input.ClusterProxy.(*common.VMServiceClusterProxy)
 
-		skipper.SkipUnlessSupervisorCapabilityEnabled(ctx, svClusterProxy, consts.VMHardAffinityDuringExecutionCapabilityName)
+		skipper.SkipUnlessTaggingAPIEnabled(ctx, svClusterProxy)
 
 		var err error
 		adminProxy, err = svClusterProxy.NewAdminClusterProxy(ctx)

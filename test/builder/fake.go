@@ -21,7 +21,6 @@ import (
 	imgregv1 "github.com/vmware-tanzu/image-registry-operator-api/api/v1alpha2"
 	netopv1alpha1 "github.com/vmware-tanzu/net-operator-api/api/v1alpha1"
 	vpcv1alpha1 "github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
-
 	appv1a1 "github.com/vmware-tanzu/vm-operator/external/appplatform/api/v1alpha1"
 	byokv1 "github.com/vmware-tanzu/vm-operator/external/byok/api/v1alpha1"
 	capv1 "github.com/vmware-tanzu/vm-operator/external/capabilities/api/v1alpha1"
@@ -71,6 +70,10 @@ func NewFakeClientWithInterceptors(
 			&vspherepolv1.Tag{},
 			kubeutil.TagOwnerReferencesUIDIndexKey,
 			kubeutil.TagOwnerReferencesUIDIndexerFunc).
+		WithIndex(
+			&vmopv1.VirtualMachine{},
+			kubeutil.VMLabelKeyValueIndexKey,
+			kubeutil.VMLabelKeyValueIndexerFunc).
 		Build()
 }
 

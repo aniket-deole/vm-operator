@@ -161,7 +161,9 @@ func CreateConfigSpec(
 	// Apply placement policies and tag specs when feature is enabled
 	affinityConstraints := CalculateAffinityConstraints(vmCtx, true)
 	genConfigSpecAffinityPolicies(vmCtx, &configSpec, affinityConstraints)
-	genConfigSpecTagSpecsFromVMLabels(vmCtx, &configSpec, affinityConstraints)
+	if !pkgcfg.FromContext(vmCtx).Features.TaggingAPI {
+		genConfigSpecTagSpecsFromVMLabels(vmCtx, &configSpec, affinityConstraints)
+	}
 
 	return configSpec
 }
@@ -321,6 +323,7 @@ func CreateConfigSpecForPlacement(
 	// Populate the affinity policy for the VM.
 	affinityConstraints := CalculateAffinityConstraints(vmCtx, false)
 	genConfigSpecAffinityPolicies(vmCtx, &configSpec, affinityConstraints)
+	// Placement needs matching tags even before the first Tag resource exists.
 	genConfigSpecTagSpecsFromVMLabels(vmCtx, &configSpec, affinityConstraints)
 
 	cleanupConfigSpecForPlacement(&configSpec)

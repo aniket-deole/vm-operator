@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -26,12 +28,12 @@ import (
 
 	netopv1alpha1 "github.com/vmware-tanzu/net-operator-api/api/v1alpha1"
 	vpcv1alpha1 "github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
-
-	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha6"
 	byokv1 "github.com/vmware-tanzu/vm-operator/external/byok/api/v1alpha1"
 	ncpv1alpha1 "github.com/vmware-tanzu/vm-operator/external/ncp/api/v1alpha1"
 	cnsv1alpha1 "github.com/vmware-tanzu/vm-operator/external/vsphere-csi-driver/api/v1alpha1"
 	vspherepolv1 "github.com/vmware-tanzu/vm-operator/external/vsphere-policy/api/v1alpha1"
+
+	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha6"
 	pkgcond "github.com/vmware-tanzu/vm-operator/pkg/conditions"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
 	pkgconst "github.com/vmware-tanzu/vm-operator/pkg/constants"
@@ -55,6 +57,7 @@ import (
 	"github.com/vmware-tanzu/vm-operator/pkg/vmconfig/diskpromo"
 	vmconfextraconfig "github.com/vmware-tanzu/vm-operator/pkg/vmconfig/extraconfig"
 	vmconfnetworkextraconfig "github.com/vmware-tanzu/vm-operator/pkg/vmconfig/networkextraconfig"
+	vmconfvmtags "github.com/vmware-tanzu/vm-operator/pkg/vmconfig/vmtags"
 )
 
 const (
@@ -210,6 +213,12 @@ func AddToManager(ctx *pkgctx.ControllerManagerContext, mgr manager.Manager) err
 		if err := kubeutil.RegisterVMTagsIndexes(ctx, mgr.GetFieldIndexer()); err != nil {
 			return fmt.Errorf("failed to register VM Tag field indexes: %w", err)
 		}
+		builder = builder.Watches(
+			&vspherepolv1.Tag{},
+			handler.EnqueueRequestsFromMapFunc(
+				kubeutil.TagToVirtualMachineMapper(ctx, r.Client)),
+			ctrlbuilder.WithPredicates(kubeutil.TagFanOutPredicate()),
+		)
 	}
 
 	// Setup watches for the network interface CR types supported on this cluster.
@@ -388,6 +397,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if pkgcfg.FromContext(ctx).Features.TelcoVMServiceAPI {
 		ctx = vmconfig.Register(ctx, vmconfextraconfig.New())
 		ctx = vmconfig.Register(ctx, vmconfnetworkextraconfig.New())
+	}
+
+	if pkgcfg.FromContext(ctx).Features.TaggingAPI {
+		ctx = vmconfig.Register(ctx, vmconfvmtags.New())
 	}
 
 	ctx = ctxop.WithContext(ctx)

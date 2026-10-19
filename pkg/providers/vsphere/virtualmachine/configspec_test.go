@@ -7,15 +7,14 @@ package virtualmachine_test
 import (
 	"fmt"
 
+	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/vmware/govmomi/object"
+	vimtypes "github.com/vmware/govmomi/vim25/types"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/google/uuid"
-	"github.com/vmware/govmomi/object"
-	vimtypes "github.com/vmware/govmomi/vim25/types"
 
 	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha6"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
@@ -782,6 +781,19 @@ var _ = Describe("CreateConfigSpec", func() {
 				expectedTagNames := []string{"app:web", "env:prod"}
 				assertVMTags(configSpec, expectedTagNames, vmCtx.VM.Namespace)
 			})
+
+			Context("and Features.TaggingAPI is enabled", func() {
+				BeforeEach(func() {
+					pkgcfg.SetContext(vmCtx, func(config *pkgcfg.Config) {
+						config.Features.TaggingAPI = true
+					})
+				})
+
+				It("emits no mechanism-A tag specs, leaving placement policies untouched", func() {
+					Expect(configSpec.VmPlacementPolicies).To(HaveLen(3))
+					assertVMTags(configSpec, []string{}, vmCtx.VM.Namespace)
+				})
+			})
 		})
 
 		When("VMAffinityDuringExecution feature flag is disabled", func() {
@@ -876,6 +888,43 @@ var _ = Describe("CreateConfigSpec", func() {
 						PolicyTopology:   zone,
 					},
 				))
+			})
+
+			Context("TaggingAPI is enabled and the anti-affinity target label is absent", func() {
+				BeforeEach(func() {
+					pkgcfg.SetContext(vmCtx, func(config *pkgcfg.Config) {
+						config.Features.TaggingAPI = true
+						config.Features.VMPlacementPolicies = true
+					})
+					vmCtx.VM.Spec.Affinity.VMAffinity = nil
+					vmCtx.VM.Spec.Affinity.VMAntiAffinity.RequiredDuringSchedulingPreferredDuringExecution[0].LabelSelector.MatchLabels = map[string]string{"app": "db"}
+				})
+
+				It("emits the grouped zone target policy on create without attaching its tag to the declaring VM", func() {
+					Expect(configSpec.VmPlacementPolicies).To(ConsistOf(
+						&vimtypes.VmToVmGroupsAntiAffinity{
+							AntiAffinedVmGroupTags: []vimtypes.TagId{{
+								NameId: &vimtypes.TagIdNameId{Tag: "app:db", Category: vmCtx.VM.Namespace},
+							}},
+							PolicyStrictness: string(vimtypes.VmPlacementPolicyVmPlacementPolicyStrictnessRequiredDuringPlacementPreferredDuringExecution),
+							PolicyTopology:   string(vimtypes.VmPlacementPolicyVmPlacementPolicyTopologyVSphereZone),
+						},
+					))
+					Expect(configSpec.TagSpecs).To(BeEmpty())
+				})
+
+				Context("VMPlacementPolicies is disabled", func() {
+					BeforeEach(func() {
+						pkgcfg.SetContext(vmCtx, func(config *pkgcfg.Config) {
+							config.Features.VMPlacementPolicies = false
+						})
+					})
+
+					It("omits zone policies even with TaggingAPI and hard affinity enabled", func() {
+						Expect(configSpec.VmPlacementPolicies).To(BeEmpty())
+						Expect(configSpec.TagSpecs).To(BeEmpty())
+					})
+				})
 			})
 		})
 	})
@@ -1174,6 +1223,19 @@ var _ = Describe("CreateConfigSpecForPlacement", func() {
 
 					Expect(configSpec.VmPlacementPolicies).To(ConsistOf(pols))
 					assertVMTags(configSpec, []string{"env:prod", "app:db", "zone:us-west"}, vmCtx.VM.Namespace)
+				})
+
+				Context("and Features.TaggingAPI is enabled", func() {
+					BeforeEach(func() {
+						pkgcfg.SetContext(vmCtx, func(config *pkgcfg.Config) {
+							config.Features.TaggingAPI = true
+						})
+					})
+
+					It("retains affinity-derived tags for initial placement", func() {
+						Expect(configSpec.VmPlacementPolicies).To(HaveLen(3))
+						assertVMTags(configSpec, []string{"env:prod", "app:db", "zone:us-west"}, vmCtx.VM.Namespace)
+					})
 				})
 			})
 

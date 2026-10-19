@@ -10,7 +10,6 @@ import (
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vapi/tags"
 	"github.com/vmware/govmomi/vim25/mo"
@@ -18,6 +17,7 @@ import (
 
 	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha6"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
+	"github.com/vmware-tanzu/vm-operator/pkg/constants/testlabels"
 	pkgctx "github.com/vmware-tanzu/vm-operator/pkg/context"
 	ctxop "github.com/vmware-tanzu/vm-operator/pkg/context/operation"
 	"github.com/vmware-tanzu/vm-operator/pkg/providers/vsphere/constants"
@@ -327,3 +327,124 @@ func cleanupOnDeleteTests() {
 		})
 	})
 }
+
+var _ = Describe("removeTagAssociations", Label(testlabels.Controller), func() {
+	const vmNamespace = "test-ns"
+
+	var (
+		ctx        context.Context
+		config     *vimtypes.VirtualMachineConfigInfo
+		configSpec *vimtypes.VirtualMachineConfigSpec
+	)
+
+	nameIDRemoveTagSpec := func(tag, category string) vimtypes.TagSpec {
+		return vimtypes.TagSpec{
+			ArrayUpdateSpec: vimtypes.ArrayUpdateSpec{
+				Operation: vimtypes.ArrayUpdateOperationRemove,
+			},
+			Id: vimtypes.TagId{
+				NameId: &vimtypes.TagIdNameId{Tag: tag, Category: category},
+			},
+		}
+	}
+
+	uuidRemoveTagSpec := func(uuid string) vimtypes.TagSpec {
+		return vimtypes.TagSpec{
+			ArrayUpdateSpec: vimtypes.ArrayUpdateSpec{
+				Operation: vimtypes.ArrayUpdateOperationRemove,
+			},
+			Id: vimtypes.TagId{Uuid: uuid},
+		}
+	}
+
+	BeforeEach(func() {
+		ctx = pkgcfg.NewContextWithDefaultConfig()
+
+		config = &vimtypes.VirtualMachineConfigInfo{
+			ExtraConfig: []vimtypes.BaseOptionValue{
+				&vimtypes.OptionValue{
+					Key:   virtualmachine.ExtraConfigVMTagsKey,
+					Value: "team:blue,team:red",
+				},
+				&vimtypes.OptionValue{
+					Key:   policy.ExtraConfigPolicyTagsKey,
+					Value: "policy-uuid-1,policy-uuid-2",
+				},
+			},
+		}
+		configSpec = &vimtypes.VirtualMachineConfigSpec{}
+	})
+
+	When("config is nil", func() {
+		It("does nothing", func() {
+			virtualmachine.RemoveTagAssociations(ctx, vmNamespace, nil, configSpec)
+			Expect(configSpec.TagSpecs).To(BeEmpty())
+		})
+	})
+
+	When("TaggingAPI is enabled", func() {
+		BeforeEach(func() {
+			pkgcfg.SetContext(ctx, func(c *pkgcfg.Config) {
+				c.Features.TaggingAPI = true
+			})
+		})
+
+		It("emits a NameId removal for each recorded VM tag", func() {
+			virtualmachine.RemoveTagAssociations(ctx, vmNamespace, config, configSpec)
+
+			Expect(configSpec.TagSpecs).To(ConsistOf(
+				nameIDRemoveTagSpec("team:blue", vmNamespace),
+				nameIDRemoveTagSpec("team:red", vmNamespace),
+			))
+		})
+
+		When("VSpherePolicies is also enabled", func() {
+			BeforeEach(func() {
+				pkgcfg.SetContext(ctx, func(c *pkgcfg.Config) {
+					c.Features.VSpherePolicies = true
+				})
+			})
+
+			It("still emits the vSphere policy path's UUID removals alongside the affinity tag removals", func() {
+				virtualmachine.RemoveTagAssociations(ctx, vmNamespace, config, configSpec)
+
+				Expect(configSpec.TagSpecs).To(ConsistOf(
+					nameIDRemoveTagSpec("team:blue", vmNamespace),
+					nameIDRemoveTagSpec("team:red", vmNamespace),
+					uuidRemoveTagSpec("policy-uuid-1"),
+					uuidRemoveTagSpec("policy-uuid-2"),
+				))
+			})
+		})
+	})
+
+	When("TaggingAPI is disabled", func() {
+		BeforeEach(func() {
+			pkgcfg.SetContext(ctx, func(c *pkgcfg.Config) {
+				c.Features.TaggingAPI = false
+			})
+		})
+
+		It("emits nothing for this feature", func() {
+			virtualmachine.RemoveTagAssociations(ctx, vmNamespace, config, configSpec)
+			Expect(configSpec.TagSpecs).To(BeEmpty())
+		})
+
+		When("VSpherePolicies is enabled", func() {
+			BeforeEach(func() {
+				pkgcfg.SetContext(ctx, func(c *pkgcfg.Config) {
+					c.Features.VSpherePolicies = true
+				})
+			})
+
+			It("still emits the vSphere policy path's UUID removals", func() {
+				virtualmachine.RemoveTagAssociations(ctx, vmNamespace, config, configSpec)
+
+				Expect(configSpec.TagSpecs).To(ConsistOf(
+					uuidRemoveTagSpec("policy-uuid-1"),
+					uuidRemoveTagSpec("policy-uuid-2"),
+				))
+			})
+		})
+	})
+})

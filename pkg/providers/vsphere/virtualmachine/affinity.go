@@ -174,6 +174,17 @@ func genConfigSpecTagSpecsFromVMLabels(
 			continue
 		}
 
+		// Skip matching tag additions already present in the placement config.
+		if pkgcfg.FromContext(vmCtx).Features.TaggingAPI &&
+			slices.ContainsFunc(configSpec.TagSpecs, func(spec vimtypes.TagSpec) bool {
+				return spec.Operation == vimtypes.ArrayUpdateOperationAdd &&
+					spec.Id.NameId != nil &&
+					spec.Id.NameId.Category == vmCtx.VM.Namespace &&
+					spec.Id.NameId.Tag == key+":"+value
+			}) {
+			continue
+		}
+
 		tagsToAdd = append(tagsToAdd, vimtypes.TagSpec{
 			ArrayUpdateSpec: vimtypes.ArrayUpdateSpec{
 				Operation: vimtypes.ArrayUpdateOperationAdd,

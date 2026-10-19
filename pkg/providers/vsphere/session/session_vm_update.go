@@ -16,13 +16,15 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/mo"
 	vimtypes "github.com/vmware/govmomi/vim25/types"
+
 	apiEquality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	vspherepolv1 "github.com/vmware-tanzu/vm-operator/external/vsphere-policy/api/v1alpha1"
+
 	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha6"
 	vmopv1common "github.com/vmware-tanzu/vm-operator/api/v1alpha6/common"
-	vspherepolv1 "github.com/vmware-tanzu/vm-operator/external/vsphere-policy/api/v1alpha1"
 	"github.com/vmware-tanzu/vm-operator/pkg/conditions"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
 	pkgconst "github.com/vmware-tanzu/vm-operator/pkg/constants"
@@ -1404,6 +1406,24 @@ func reconcileVMTagCRs(
 	return vmconfvmtags.ReconcileTagCRs(ctx, k8sClient, vm)
 }
 
+// reconcileVMTagSpecs emits the vCenter TagSpec add/remove diff for
+// every label this VM carries that participates in affinity namespace-wide,
+// against this feature's own ExtraConfig record. ownedTags is the result of
+// reconcileVMTagCRs, called earlier in doReconfigure.
+func reconcileVMTagSpecs(
+	ctx context.Context,
+	k8sClient ctrlclient.Client,
+	vm *vmopv1.VirtualMachine,
+	_ *object.VirtualMachine,
+	moVM mo.VirtualMachine,
+	configSpec *vimtypes.VirtualMachineConfigSpec,
+	ownedTags []vspherepolv1.Tag) error {
+
+	pkglog.FromContextOrDefault(ctx).V(4).Info("Reconciling VM Tag specs")
+
+	return vmconfvmtags.ReconcileTagSpecs(ctx, k8sClient, vm, moVM, configSpec, ownedTags)
+}
+
 // reconcileVirtualControllers check if VM need virtual controller changes,
 // If yes, update configSpec.DeviceChange.
 func reconcileVirtualControllers(
@@ -1592,8 +1612,10 @@ func doReconfigure(
 		}
 	}
 
+	var ownedTags []vspherepolv1.Tag
 	if pkgcfg.FromContext(ctx).Features.TaggingAPI {
-		if _, err := reconcileVMTagCRs(
+		var err error
+		if ownedTags, err = reconcileVMTagCRs(
 			ctx,
 			k8sClient,
 			vm); err != nil {
@@ -1610,6 +1632,20 @@ func doReconfigure(
 			vcVM,
 			moVM,
 			&configSpec); err != nil {
+
+			return err
+		}
+	}
+
+	if pkgcfg.FromContext(ctx).Features.TaggingAPI {
+		if err := reconcileVMTagSpecs(
+			ctx,
+			k8sClient,
+			vm,
+			vcVM,
+			moVM,
+			&configSpec,
+			ownedTags); err != nil {
 
 			return err
 		}

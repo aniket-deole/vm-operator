@@ -25,6 +25,7 @@ import (
 	"github.com/vmware/govmomi/vapi/tags"
 	"github.com/vmware/govmomi/vim25/mo"
 	vimtypes "github.com/vmware/govmomi/vim25/types"
+
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1840,6 +1841,18 @@ func (vs *vSphereVMProvider) vmCreateDoPlacement(
 		return err
 	}
 
+	if pkgcfg.FromContext(vmCtx).Features.TaggingAPI {
+		err = virtualmachine.AppendExistingTagSpecs(
+			vmCtx,
+			vs.k8sClient,
+			vmCtx,
+			&placementConfigSpec,
+			!virtualmachine.RecordTagInExtraConfig)
+		if err != nil {
+			return err
+		}
+	}
+
 	pvcZones, err := kubeutil.GetPVCZoneConstraints(
 		createArgs.Storage.StorageClasses,
 		createArgs.Storage.PVCs)
@@ -2627,6 +2640,18 @@ func (vs *vSphereVMProvider) vmCreateGenConfigSpec(
 		createArgs.VMClass.Spec,
 		createArgs.ImageStatus,
 		minCPUFreq)
+
+	if pkgcfg.FromContext(vmCtx).Features.TaggingAPI {
+		if err := virtualmachine.AppendExistingTagSpecs(
+			vmCtx,
+			vs.k8sClient,
+			vmCtx,
+			&createArgs.ConfigSpec,
+			virtualmachine.RecordTagInExtraConfig); err != nil {
+
+			return err
+		}
+	}
 
 	if pkgcfg.FromContext(vmCtx).Features.FastDeploy {
 		if err := vs.vmCreateGenConfigSpecImage(vmCtx, createArgs); err != nil {

@@ -125,6 +125,21 @@ E2E_NAMESPACE=my-test-ns make e2e-smoke
 E2E_NAMESPACE=debug-ns TEST_FOCUS="VM-HARDWARE" FLAKE_ATTEMPTS=2 make e2e-core
 ```
 
+### Affinity tagging
+
+`VM-AFFINITY-TAG` in `vmservice/vmservice/virtualmachine/vm_affinity.go` covers Tag CR ownership, namespace isolation, vCenter tag attachment/removal, label-only VM fan-out, label gains/swaps, Tag recreation after confirmed deletion, and skip-delete platform cleanup. It requires the Tag CRD, the Supervisor capability `supports_vm_service_vm_hard_affinity_during_execution` backing `Features.TaggingAPI`, VM Groups, and affinity during execution. The TaggingAPI gate reads the Supervisor capability through the established legacy ConfigMap / async-upgrade Capabilities lookup; it does not require a deployment environment variable. The namespace-isolation case creates a second WCP namespace; vCenter assertions use the testbed administrator credentials.
+
+The skip-delete scenario requires an admin Kubernetes client for the protected annotation and vCenter privileges to power off and destroy the retained platform VM during cleanup. It checks that an unrelated tag survives while affinity tags and their `vmservice.tags` record are removed.
+
+All scenarios carry `experimental` until validated on a real WCP cluster. To include them explicitly:
+
+```bash
+make test-e2e TEST_FOCUS="VM-AFFINITY-TAG" \
+  LABEL_FILTER="experimental && core-functional"
+```
+
+The active experimental anti-affinity scenario verifies that its create-time grouped zone policy provisions the target tag even when the owner does not carry that label. It additionally requires `VMPlacementPolicies` and a topology supporting zone anti-affinity. Tag convergence and deletion use `default/wait-vm-affinity-tag-applied` and `default/wait-tag-cr-deleted` from `wcp.yaml`.
+
 ## Test Categories and Labels
 
 Tests are organized using Ginkgo labels for easy filtering:
